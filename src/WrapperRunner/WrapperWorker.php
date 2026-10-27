@@ -12,15 +12,20 @@ use Symfony\Component\Process\Process;
 use Throwable;
 
 use function array_map;
+use function array_slice;
 use function assert;
 use function clearstatcache;
+use function count;
 use function file_get_contents;
 use function filesize;
 use function implode;
 use function is_array;
 use function is_string;
+use function max;
 use function serialize;
 use function sprintf;
+use function str_split;
+use function strlen;
 use function touch;
 use function uniqid;
 
@@ -41,9 +46,11 @@ final class WrapperWorker
     public readonly SplFileInfo $teamcityFile;
     public readonly SplFileInfo $testdoxFile;
 
-    private ?string $currentlyExecuting = null;
+    /** @var list<string> Assigned tests the worker hasn't finished yet: the first one is running */
+    private array $queue = [];
     private Process $process;
     private int $inExecution = 0;
+    private int $finished    = 0;
     private InputStream $input;
     private int $exitCode = -1;
 
@@ -179,29 +186,32 @@ final class WrapperWorker
 
     public function getWorkerCrashedException(?Throwable $previousException = null): WorkerCrashedException
     {
+        $this->readStatus();
+
         return WorkerCrashedException::fromProcess(
             $this->process,
-            $this->currentlyExecuting ?? 'N.A.',
+            $this->queue[0] ?? 'N.A.',
             $previousException,
         );
     }
 
     public function assign(string $test): void
     {
-        assert($this->currentlyExecuting === null);
-
         if ($this->options->verbose) {
             $this->output->write("Process {$this->token} executing: {$test}\n");
         }
 
         $this->write($test . "\n");
-        $this->currentlyExecuting = $test;
+        $this->queue[] = $test;
         ++$this->inExecution;
     }
 
-    public function reset(): void
+    /** Number of assigned tests the worker hasn't finished yet */
+    public function queued(): int
     {
-        $this->currentlyExecuting = null;
+        $this->readStatus();
+
+        return count($this->queue);
     }
 
     public function stop(): void
@@ -222,18 +232,30 @@ final class WrapperWorker
 
     public function isFree(): bool
     {
+        return $this->queued() === 0;
+    }
+
+    /**
+     * The worker writes one exit code to the status file per finished test: take the tests it finished since the
+     * last look off the queue, and keep the worst exit code among them
+     */
+    private function readStatus(): void
+    {
         $statusFilepath = $this->statusFile->getPathname();
         clearstatcache(true, $statusFilepath);
 
-        $isFree = $this->inExecution === filesize($statusFilepath);
-
-        if ($isFree && $this->inExecution > 0) {
-            $exitCodes = file_get_contents($statusFilepath);
-            assert(is_string($exitCodes) && $exitCodes !== '');
-            $this->exitCode = (int) $exitCodes[-1];
+        if (filesize($statusFilepath) <= $this->finished) {
+            return;
         }
 
-        return $isFree;
+        $exitCodes = file_get_contents($statusFilepath, false, null, $this->finished);
+        assert(is_string($exitCodes) && $exitCodes !== '');
+        foreach (str_split($exitCodes) as $exitCode) {
+            $this->exitCode = max($this->exitCode, (int) $exitCode);
+        }
+
+        $this->queue     = array_slice($this->queue, strlen($exitCodes));
+        $this->finished += strlen($exitCodes);
     }
 
     public function getExitCode(): int

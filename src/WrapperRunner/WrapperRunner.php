@@ -64,6 +64,7 @@ use const DIRECTORY_SEPARATOR;
 final class WrapperRunner implements RunnerInterface
 {
     private const int CYCLE_SLEEP = 1000;
+    private const int QUEUE_SIZE  = 2;
     private readonly ResultPrinter $printer;
 
     /** @var list<non-empty-string> */
@@ -180,7 +181,11 @@ final class WrapperRunner implements RunnerInterface
 
     private function assignAllPendingTests(): void
     {
-        $batchSize = $this->options->maxBatchSize;
+        $batchSize     = $this->options->maxBatchSize;
+        $stopOnFailure = $this->options->configuration->stopOnFailureThreshold() > 0;
+        // Queue the next test while a worker runs one, so it doesn't have to wait for the runner to notice it's done.
+        // Stopping on failure must not run any more tests after the failure: assign one test at a time then
+        $queueSize = $stopOnFailure ? 1 : self::QUEUE_SIZE;
 
         while (count($this->pending) > 0 && count($this->workers) > 0) {
             foreach ($this->workers as $token => $worker) {
@@ -188,25 +193,37 @@ final class WrapperRunner implements RunnerInterface
                     throw $worker->getWorkerCrashedException();
                 }
 
-                if (! $worker->isFree()) {
+                $queued = $worker->queued();
+                if ($queued >= $queueSize) {
                     continue;
                 }
 
                 $this->flushWorker($worker);
 
                 if ($batchSize !== 0 && $this->batches[$token] === $batchSize) {
+                    // The batch must be finished before the worker is replaced
+                    if ($queued > 0) {
+                        continue;
+                    }
+
                     $this->destroyWorker($token);
                     $worker = $this->startWorker($token);
                 }
 
-                if (
-                    $this->exitcode > 0
-                    && $this->options->configuration->stopOnFailureThreshold() > 0
-                ) {
+                if ($this->exitcode > 0 && $stopOnFailure) {
                     $this->pending = [];
-                } elseif (($pending = array_shift($this->pending)) !== null) {
+
+                    continue;
+                }
+
+                while (
+                    $queued < $queueSize
+                    && ($batchSize === 0 || $this->batches[$token] < $batchSize)
+                    && ($pending = array_shift($this->pending)) !== null
+                ) {
                     $worker->assign($pending);
                     $this->batches[$token]++;
+                    ++$queued;
                 }
             }
 
@@ -233,7 +250,6 @@ final class WrapperRunner implements RunnerInterface
             $worker->unexpectedOutputFile,
             $worker->teamcityFile ?? null,
         );
-        $worker->reset();
     }
 
     private function waitForAllToFinish(): void

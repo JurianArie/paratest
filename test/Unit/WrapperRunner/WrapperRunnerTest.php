@@ -502,6 +502,17 @@ final class WrapperRunnerTest extends TestBase
         $this->runRunner();
     }
 
+    public function testExitCodeOfQueuedTestsIsTheWorstOne(): void
+    {
+        // A single worker gets the next test queued: an error must not be hidden by the tests finishing after it
+        $this->bareOptions['--processes'] = '1';
+        $this->bareOptions['path']        = $this->fixture('common_results');
+        $runnerResult                     = $this->runRunner();
+
+        self::assertStringContainsString('Errors: 1', $runnerResult->output);
+        self::assertSame(RunnerInterface::EXCEPTION_EXIT, $runnerResult->exitCode);
+    }
+
     public function testExitCodes(): void
     {
         $this->bareOptions['path'] = $this->fixture('common_results' . DIRECTORY_SEPARATOR . 'ErrorTest.php');
