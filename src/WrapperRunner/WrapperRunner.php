@@ -35,7 +35,6 @@ use Symfony\Component\Process\PhpExecutableFinder;
 
 use function array_filter;
 use function array_map;
-use function array_merge;
 use function array_merge_recursive;
 use function array_shift;
 use function array_values;
@@ -99,6 +98,8 @@ final class WrapperRunner implements RunnerInterface
     private array $testdoxFiles = [];
     /** @var array<non-empty-string> */
     private readonly array $parameters;
+    /** @var non-empty-list<non-empty-string> */
+    private readonly array $phpCommand;
     private CodeCoverageFilterRegistry $codeCoverageFilterRegistry;
     /** @var non-empty-string */
     private string $runTmpDir;
@@ -117,18 +118,11 @@ final class WrapperRunner implements RunnerInterface
         $phpBin    = $phpFinder->find(false);
         assert($phpBin !== false);
         assert($phpBin !== '');
-        $parameters = [$phpBin];
-        /** @var array<non-empty-string> $arguments */
-        $arguments  = $phpFinder->findArguments();
-        $parameters = array_merge($parameters, $arguments);
+        /** @var list<non-empty-string> $arguments */
+        $arguments = $phpFinder->findArguments();
 
-        if ($options->passthruPhp !== null) {
-            $parameters = array_merge($parameters, $options->passthruPhp);
-        }
-
-        $parameters[] = $wrapper;
-
-        $this->parameters                 = $parameters;
+        $this->phpCommand                 = [$phpBin, ...$arguments, ...$options->passthruPhp ?? []];
+        $this->parameters                 = [...$this->phpCommand, $wrapper];
         $this->codeCoverageFilterRegistry = new CodeCoverageFilterRegistry();
     }
 
@@ -139,6 +133,7 @@ final class WrapperRunner implements RunnerInterface
             $this->options,
             $this->output,
             $this->codeCoverageFilterRegistry,
+            new CoverageCacheWarmer($this->phpCommand),
         );
         $result      = TestResultFacade::result();
 

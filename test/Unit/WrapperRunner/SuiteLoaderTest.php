@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ParaTest\Tests\Unit\WrapperRunner;
 
 use ParaTest\Tests\TestBase;
+use ParaTest\WrapperRunner\CoverageCacheWarmer;
 use ParaTest\WrapperRunner\ShardDistribution;
 use ParaTest\WrapperRunner\SuiteLoader;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -19,6 +20,7 @@ use function preg_match;
 use function uniqid;
 
 use const DIRECTORY_SEPARATOR;
+use const PHP_BINARY;
 
 /** @internal */
 #[CoversClass(SuiteLoader::class)]
@@ -363,6 +365,6 @@ final class SuiteLoaderTest extends TestBase
     {
         $options = $this->createOptionsFromArgv($this->bareOptions);
 
-        return new SuiteLoader($options, $this->output, new CodeCoverageFilterRegistry());
+        return new SuiteLoader($options, $this->output, new CodeCoverageFilterRegistry(), new CoverageCacheWarmer([PHP_BINARY]));
     }
 }

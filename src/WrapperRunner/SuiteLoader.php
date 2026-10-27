@@ -21,7 +21,6 @@ use PHPUnit\Runner\TestRunHistory\NullTestRunHistory;
 use PHPUnit\Runner\TestSuiteSorter;
 use PHPUnit\TestRunner\TestResult\Facade as TestResultFacade;
 use PHPUnit\TextUI\Command\Result;
-use PHPUnit\TextUI\Command\WarmCodeCoverageCacheCommand;
 use PHPUnit\TextUI\Configuration\CodeCoverageFilterRegistry;
 use PHPUnit\TextUI\Configuration\PhpHandler;
 use PHPUnit\TextUI\Configuration\TestSuiteBuilder;
@@ -30,6 +29,7 @@ use Random\Engine\Mt19937;
 use Random\Randomizer;
 use ReflectionClass;
 use ReflectionProperty;
+use SebastianBergmann\Timer\Timer;
 use Symfony\Component\Console\Output\OutputInterface;
 
 use function array_filter;
@@ -43,8 +43,6 @@ use function count;
 use function is_int;
 use function is_string;
 use function mt_srand;
-use function ob_get_clean;
-use function ob_start;
 use function preg_quote;
 use function sprintf;
 use function str_starts_with;
@@ -52,6 +50,7 @@ use function strlen;
 use function substr;
 
 use const ARRAY_FILTER_USE_KEY;
+use const PHP_EOL;
 
 /** @internal */
 final readonly class SuiteLoader
@@ -64,6 +63,7 @@ final readonly class SuiteLoader
         private Options $options,
         OutputInterface $output,
         CodeCoverageFilterRegistry $codeCoverageFilterRegistry,
+        CoverageCacheWarmer $coverageCacheWarmer,
     ) {
         $emitter = EventFacade::emitter();
         (new PhpHandler($emitter))->handle($this->options->configuration->php());
@@ -170,18 +170,46 @@ final readonly class SuiteLoader
             return;
         }
 
-        ob_start();
-        $result       = (new WarmCodeCoverageCacheCommand(
-            $this->options->configuration,
-            $codeCoverageFilterRegistry,
-        ))->execute();
-        $ob_get_clean = ob_get_clean();
-        assert($ob_get_clean !== false);
-        $output->write($ob_get_clean);
-        $output->write($result->output());
-        if ($result->shellExitCode() !== Result::SUCCESS) {
-            exit($result->shellExitCode());
+        // Same as PHPUnit's WarmCodeCoverageCacheCommand, but the files are analysed in parallel
+        if (! $this->options->configuration->hasCoverageCacheDirectory()) {
+            $output->write('Cache for static analysis has not been configured' . PHP_EOL);
+
+            exit(Result::FAILURE);
         }
+
+        $codeCoverageFilterRegistry->init($this->options->configuration, true);
+        if (! $codeCoverageFilterRegistry->configured()) {
+            $output->write('Filter for code coverage has not been configured' . PHP_EOL);
+
+            exit(Result::FAILURE);
+        }
+
+        $timer = new Timer();
+        $timer->start();
+
+        $output->write('Warming cache for static analysis ... ');
+
+        $statistics = $coverageCacheWarmer->warm(
+            $this->options->configuration->coverageCacheDirectory(),
+            ! $this->options->configuration->disableCodeCoverageIgnore(),
+            $this->options->configuration->ignoreDeprecatedCodeUnitsFromCodeCoverage(),
+            $codeCoverageFilterRegistry->get()->files(),
+            $this->options->processes,
+        );
+
+        $output->write(sprintf(
+            '[%s]%s%s%d file%s processed, %d cache hit%s, %d cache miss%s%s',
+            $timer->stop()->asString(),
+            PHP_EOL,
+            PHP_EOL,
+            $statistics['cacheHits'] + $statistics['cacheMisses'],
+            $statistics['cacheHits'] + $statistics['cacheMisses'] !== 1 ? 's' : '',
+            $statistics['cacheHits'],
+            $statistics['cacheHits'] !== 1 ? 's' : '',
+            $statistics['cacheMisses'],
+            $statistics['cacheMisses'] !== 1 ? 'es' : '',
+            PHP_EOL,
+        ));
     }
 
     /** @return Generator<non-empty-string, (PhptTestCase|TestCase)> */
