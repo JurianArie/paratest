@@ -194,7 +194,7 @@ final class WrapperWorker
             $this->output->write("Process {$this->token} executing: {$test}\n");
         }
 
-        $this->input->write($test . "\n");
+        $this->write($test . "\n");
         $this->currentlyExecuting = $test;
         ++$this->inExecution;
     }
@@ -206,7 +206,18 @@ final class WrapperWorker
 
     public function stop(): void
     {
-        $this->input->write(self::COMMAND_EXIT);
+        $this->write(self::COMMAND_EXIT);
+    }
+
+    private function write(string $command): void
+    {
+        $this->input->write($command);
+
+        // The process only passes input on to the worker when it looks at its pipes, one chunk at a time, and the
+        // first chunk is the empty one the input stream yields while idle: look twice right away, instead of letting
+        // the worker wait for the next two cycles of the runner's loop
+        $this->process->isRunning();
+        $this->process->isRunning();
     }
 
     public function isFree(): bool
