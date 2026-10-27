@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ParaTest\WrapperRunner;
 
+use Closure;
 use Generator;
 use ParaTest\Options;
 use PHPUnit\Event\Facade as EventFacade;
@@ -67,6 +68,16 @@ final readonly class SuiteLoader
     ) {
         $emitter = EventFacade::emitter();
         (new PhpHandler($emitter))->handle($this->options->configuration->php());
+
+        // Warming the static analysis cache doesn't need the test suite: let it run while the suite is loaded
+        $finishWarmingCoverageCache = null;
+        if ($this->options->configuration->hasCoverageReport()) {
+            $finishWarmingCoverageCache = $this->startWarmingCoverageCache(
+                $output,
+                $codeCoverageFilterRegistry,
+                $coverageCacheWarmer,
+            );
+        }
 
         if ($this->options->configuration->hasBootstrap()) {
             $bootstrapFilename = $this->options->configuration->bootstrap();
@@ -166,11 +177,23 @@ final readonly class SuiteLoader
             ? $tests
             : array_keys($files);
 
-        if (! $this->options->configuration->hasCoverageReport()) {
+        if ($finishWarmingCoverageCache === null) {
             return;
         }
 
-        // Same as PHPUnit's WarmCodeCoverageCacheCommand, but the files are analysed in parallel
+        $finishWarmingCoverageCache();
+    }
+
+    /**
+     * Same as PHPUnit's WarmCodeCoverageCacheCommand, but the files are analysed in parallel
+     *
+     * @return Closure(): void Waits for the cache to be warmed and reports on it
+     */
+    private function startWarmingCoverageCache(
+        OutputInterface $output,
+        CodeCoverageFilterRegistry $codeCoverageFilterRegistry,
+        CoverageCacheWarmer $coverageCacheWarmer,
+    ): Closure {
         if (! $this->options->configuration->hasCoverageCacheDirectory()) {
             $output->write('Cache for static analysis has not been configured' . PHP_EOL);
 
@@ -187,9 +210,7 @@ final readonly class SuiteLoader
         $timer = new Timer();
         $timer->start();
 
-        $output->write('Warming cache for static analysis ... ');
-
-        $statistics = $coverageCacheWarmer->warm(
+        $waitForWarming = $coverageCacheWarmer->start(
             $this->options->configuration->coverageCacheDirectory(),
             ! $this->options->configuration->disableCodeCoverageIgnore(),
             $this->options->configuration->ignoreDeprecatedCodeUnitsFromCodeCoverage(),
@@ -197,19 +218,25 @@ final readonly class SuiteLoader
             $this->options->processes,
         );
 
-        $output->write(sprintf(
-            '[%s]%s%s%d file%s processed, %d cache hit%s, %d cache miss%s%s',
-            $timer->stop()->asString(),
-            PHP_EOL,
-            PHP_EOL,
-            $statistics['cacheHits'] + $statistics['cacheMisses'],
-            $statistics['cacheHits'] + $statistics['cacheMisses'] !== 1 ? 's' : '',
-            $statistics['cacheHits'],
-            $statistics['cacheHits'] !== 1 ? 's' : '',
-            $statistics['cacheMisses'],
-            $statistics['cacheMisses'] !== 1 ? 'es' : '',
-            PHP_EOL,
-        ));
+        return static function () use ($output, $timer, $waitForWarming): void {
+            $output->write('Warming cache for static analysis ... ');
+
+            $statistics = $waitForWarming();
+
+            $output->write(sprintf(
+                '[%s]%s%s%d file%s processed, %d cache hit%s, %d cache miss%s%s',
+                $timer->stop()->asString(),
+                PHP_EOL,
+                PHP_EOL,
+                $statistics['cacheHits'] + $statistics['cacheMisses'],
+                $statistics['cacheHits'] + $statistics['cacheMisses'] !== 1 ? 's' : '',
+                $statistics['cacheHits'],
+                $statistics['cacheHits'] !== 1 ? 's' : '',
+                $statistics['cacheMisses'],
+                $statistics['cacheMisses'] !== 1 ? 'es' : '',
+                PHP_EOL,
+            ));
+        };
     }
 
     /** @return Generator<non-empty-string, (PhptTestCase|TestCase)> */
